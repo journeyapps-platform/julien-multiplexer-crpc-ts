@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "lib": ["es2020"],
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "target": "es2018",
+    "strict": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "rootDir": "./"
+  },
+  "include": ["src"]
+}
