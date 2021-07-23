@@ -1,4 +1,4 @@
-import * as crpc from "../src";
+import * as crpc from "../src/node";
 import "jest";
 
 describe("multiplexer", () => {
@@ -7,8 +7,12 @@ describe("multiplexer", () => {
       metadata: {},
     });
 
-    const multiplexer_server = crpc.createMultiplexer(right);
-    const multiplexer_client = crpc.createMultiplexer(left);
+    const multiplexer_client = crpc.createMultiplexer(
+      crpc.createBsonFramedConnection(left)
+    );
+    const multiplexer_server = crpc.createMultiplexer(
+      crpc.createBsonFramedConnection(right)
+    );
 
     const testBiDirectionalCommunication = async (
       mux_left: crpc.Multiplexer,
@@ -64,8 +68,12 @@ describe("multiplexer", () => {
       metadata: {},
     });
 
-    const multiplexer_client = crpc.createMultiplexer(left);
-    const multiplexer_server = crpc.createMultiplexer(right);
+    const multiplexer_client = crpc.createMultiplexer(
+      crpc.createBsonFramedConnection(left)
+    );
+    const multiplexer_server = crpc.createMultiplexer(
+      crpc.createBsonFramedConnection(right)
+    );
 
     const left_connection = crpc.createConnectionFromMultiplexer(
       multiplexer_client,

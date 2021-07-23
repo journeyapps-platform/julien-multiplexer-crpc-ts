@@ -3,6 +3,10 @@
   "scripts": {
     "test": "jest --verbose"
   },
+  "exports": {
+    "node": "./dist/node/index.js",
+    "default": "./dist/node/index.js"
+  },
   "dependencies": {
     "bson": "^4.4.1",
     "uuid": "^8.3.2",

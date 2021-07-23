@@ -1,6 +1,5 @@
 import * as connection from "./connection";
 import * as stream from "stream";
-import * as bson from "bson";
 import * as uuid from "uuid";
 
 enum PacketType {
@@ -91,28 +90,8 @@ export const createMultiplexer = (
     objectMode: true,
   });
 
-  const sink = new stream.Transform({
-    writableObjectMode: true,
-    transform(chunk: Packet, _, done) {
-      done(null, bson.serialize(chunk));
-    },
-  });
-
-  stream.pipeline(sink, transport.sink, () => {});
-
   stream.pipeline(
     transport.source,
-    new stream.Transform({
-      readableObjectMode: true,
-      transform(chunk, _, done) {
-        done(
-          null,
-          bson.deserialize(chunk, {
-            promoteBuffers: true,
-          })
-        );
-      },
-    }),
     new stream.Writable({
       objectMode: true,
       async write(packet: Packet, _, done) {
@@ -126,17 +105,17 @@ export const createMultiplexer = (
                 },
 
                 source: new stream.PassThrough(),
-                sink: createDataPacketWritable(sink, packet.id),
+                sink: createDataPacketWritable(transport.sink, packet.id),
               });
 
-              new_connection.close_status.then(status => {
-                writePacket(sink, {
+              new_connection.close_status.then((status) => {
+                writePacket(transport.sink, {
                   id: new_connection.id,
 
                   type: PacketType.Close,
-                  status: status
-                })
-              })
+                  status: status,
+                });
+              });
 
               connections.set(packet.id, new_connection);
               new_connections.write(new_connection);
@@ -179,7 +158,7 @@ export const createMultiplexer = (
       const id = uuid.v4();
 
       const conn = connection.create({
-        sink: createDataPacketWritable(sink, id),
+        sink: createDataPacketWritable(transport.sink, id),
         source: new stream.PassThrough(),
         metadata: {
           id: id,
@@ -188,21 +167,21 @@ export const createMultiplexer = (
       });
       connections.set(id, conn);
 
-      writePacket(sink, {
+      writePacket(transport.sink, {
         id: id,
 
         type: PacketType.Create,
         metadata: params.metadata,
       });
 
-      conn.close_status.then(status => {
-        writePacket(sink, {
+      conn.close_status.then((status) => {
+        writePacket(transport.sink, {
           id: id,
 
           type: PacketType.Close,
-          status: status
-        })
-      })
+          status: status,
+        });
+      });
 
       return conn;
     },

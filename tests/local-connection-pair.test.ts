@@ -1,4 +1,4 @@
-import * as crpc from "../src";
+import * as crpc from "../src/node";
 import "jest";
 
 describe("local connection pairs", () => {
