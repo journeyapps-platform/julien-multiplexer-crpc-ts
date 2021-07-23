@@ -23,14 +23,13 @@ export type CreateConnectionParams = {
   metadata: ConnectionMetadata;
 };
 
-export const close = (connection: Connection) => {
+export const close = (connection: Connection, err?: Error) => {
   connection.closed = true;
 
   connection.source.end();
   connection.sink.end();
-
-  connection.source.destroy();
-  connection.sink.destroy();
+  connection.source.destroy(err);
+  connection.sink.destroy(err);
 };
 
 type CreateConnectionFromStreamParams = CreateConnectionParams & {
