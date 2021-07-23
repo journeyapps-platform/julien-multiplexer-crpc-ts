@@ -1,18 +1,11 @@
 import * as connection from "../connection";
 import * as stream from "stream";
 import * as WebSocket from "ws";
-import * as uuid from "uuid";
 
 export const createConnectionFromWebSocket = (
   socket: WebSocket,
   params: connection.CreateConnectionParams
 ): connection.Connection => {
-  const id = params.metadata.id || uuid.v4();
-  const metadata = {
-    id,
-    ...params.metadata,
-  };
-
   const source = new stream.PassThrough();
   const sink = new stream.Writable({
     write(chunk, _, done) {
@@ -24,11 +17,23 @@ export const createConnectionFromWebSocket = (
     source.push(message);
   });
 
-  return {
-    id,
-    metadata,
-    closed: false,
+  const conn = connection.create({
+    metadata: params.metadata,
     source,
     sink,
-  };
+  });
+
+  conn.close_status.then(() => {
+    socket.close();
+  });
+
+  socket.on("error", () => {
+    connection.close(conn);
+  });
+
+  socket.on("close", () => {
+    connection.close(conn);
+  });
+
+  return conn;
 };

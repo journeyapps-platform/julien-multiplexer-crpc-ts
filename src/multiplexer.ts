@@ -20,11 +20,12 @@ type CreatePacket = CorrelationId & {
 
 type DataPacket = CorrelationId & {
   type: PacketType.Data;
-  data: Buffer;
+  data: Buffer | null;
 };
 
 type ClosePacket = CorrelationId & {
   type: PacketType.Close;
+  status: connection.CloseStatus;
 };
 
 type Packet = CreatePacket | DataPacket | ClosePacket;
@@ -37,15 +38,18 @@ export type Multiplexer = {
 };
 
 const write = async (stream: stream.Writable, data: any) => {
+  if (!stream.writable) {
+    return;
+  }
   if (stream.writableLength >= stream.writableHighWaterMark) {
     await new Promise<void>((resolve) => {
       const _resolve = () => {
         stream.off("drain", _resolve);
-        stream.off("end", _resolve);
+        stream.off("close", _resolve);
         resolve();
       };
       stream.once("drain", _resolve);
-      stream.once("end", _resolve);
+      stream.once("close", _resolve);
     });
   }
   stream.write(data);
@@ -70,7 +74,8 @@ export const createDataPacketWritable = (sink: stream.Writable, id: string) => {
       writePacket(sink, {
         id: id,
 
-        type: PacketType.Close,
+        type: PacketType.Data,
+        data: null,
       });
       done();
     },
@@ -124,6 +129,15 @@ export const createMultiplexer = (
                 sink: createDataPacketWritable(sink, packet.id),
               });
 
+              new_connection.close_status.then(status => {
+                writePacket(sink, {
+                  id: new_connection.id,
+
+                  type: PacketType.Close,
+                  status: status
+                })
+              })
+
               connections.set(packet.id, new_connection);
               new_connections.write(new_connection);
               return;
@@ -133,6 +147,9 @@ export const createMultiplexer = (
               const connection = connections.get(packet.id);
               if (!connection) {
                 return;
+              }
+              if (packet.data === null) {
+                return connection.source.end();
               }
               await write(connection.source, packet.data);
               return;
@@ -177,6 +194,15 @@ export const createMultiplexer = (
         type: PacketType.Create,
         metadata: params.metadata,
       });
+
+      conn.close_status.then(status => {
+        writePacket(sink, {
+          id: id,
+
+          type: PacketType.Close,
+          status: status
+        })
+      })
 
       return conn;
     },

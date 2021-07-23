@@ -58,4 +58,58 @@ describe("multiplexer", () => {
       multiplexer_client
     );
   });
+
+  test("sending EOF should end streams without closing connection", async () => {
+    const [left, right] = crpc.createLocalConnectionPair({
+      metadata: {},
+    });
+
+    const multiplexer_client = crpc.createMultiplexer(left);
+    const multiplexer_server = crpc.createMultiplexer(right);
+
+    const left_connection = crpc.createConnectionFromMultiplexer(
+      multiplexer_client,
+      {
+        metadata: {},
+      }
+    );
+
+    const right_connection = await crpc.takeNextConnection(multiplexer_server);
+    if (!right_connection) {
+      throw new Error("right connection not present");
+    }
+
+    const left_data = "some left->right data";
+    left_connection.sink.write(Buffer.from(left_data));
+    left_connection.sink.end();
+
+    const chunks = [];
+    for await (const chunk of right_connection.source) {
+      chunks.push(chunk);
+    }
+
+    const incoming_data = Buffer.concat(chunks);
+    expect(incoming_data.toString()).toEqual(left_data);
+    expect(right_connection.source.readable).toBe(false);
+
+    right_connection.sink.end();
+
+    const left_chunks = [];
+    for await (const chunk of left_connection.source) {
+      left_chunks.push(chunk);
+    }
+
+    expect(left_chunks.length).toBe(0);
+    expect(left_connection.source.readable).toBe(false);
+
+    expect(left_connection.closed).toBe(true);
+    expect(right_connection.closed).toBe(true);
+
+    await expect(left_connection.close_status).resolves.toBe(
+      crpc.CloseStatus.Success
+    );
+    await expect(right_connection.close_status).resolves.toBe(
+      crpc.CloseStatus.Success
+    );
+  });
 });
