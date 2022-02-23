@@ -1,30 +1,88 @@
 import * as crpc from "../src/node";
-import "jest";
 
 describe("local connection pairs", () => {
-  test("it should create a connection over a local pair of streams", async () => {
+  it("should create a connection over a local pair of streams", async () => {
     const [left, right] = crpc.createLocalConnectionPair({
-      metadata: {},
+      metadata: {}
     });
 
-    left.sink.write(Buffer.from("abc"));
+    const left_writer = left.sink.getWriter();
+    await left_writer.write(Buffer.from("abc"));
+    const right_writer = right.sink.getWriter();
+    await right_writer.write(Buffer.from("def"));
 
-    const right_data = await right.source[Symbol.asyncIterator]().next();
-    expect(right_data.value.toString()).toEqual("abc");
+    await left_writer.close();
+    await right_writer.close();
 
-    right.sink.write(Buffer.from("abc"));
+    expect((await right.source.getReader().read()).value).toEqual(
+      Buffer.from("abc")
+    );
+    expect((await left.source.getReader().read()).value).toEqual(
+      Buffer.from("def")
+    );
 
-    const left_data = await left.source[Symbol.asyncIterator]().next();
-    expect(left_data.value.toString()).toEqual("abc");
+    await expect(left.status).resolves.toEqual({
+      code: crpc.CloseStatusCode.Success
+    });
 
-    crpc.close(left);
+    await expect(right.status).resolves.toEqual({
+      code: crpc.CloseStatusCode.Success
+    });
+  });
 
-    await new Promise<void>((resolve) => setImmediate(resolve));
+  it("should close the connection if the sink aborts", async () => {
+    const [left, right] = crpc.createLocalConnectionPair({
+      metadata: {}
+    });
 
-    expect(left.closed).toBe(true);
-    expect(right.closed).toBe(true);
+    await left.sink.getWriter().abort(new Error("failed"));
 
-    expect(left.source.destroyed).toBe(true);
-    expect(left.sink.destroyed).toBe(true);
+    await expect(left.status).resolves.toEqual(
+      expect.objectContaining({
+        code: crpc.CloseStatusCode.Error
+      })
+    );
+
+    await expect(right.status).resolves.toEqual(
+      expect.objectContaining({
+        code: crpc.CloseStatusCode.Error
+      })
+    );
+  });
+
+  it("should close the connection if the source aborts", async () => {
+    const [left, right] = crpc.createLocalConnectionPair({
+      metadata: {}
+    });
+
+    await left.source.getReader().cancel(new Error("failed"));
+
+    await expect(left.status).resolves.toEqual(
+      expect.objectContaining({
+        code: crpc.CloseStatusCode.Error
+      })
+    );
+
+    await expect(right.status).resolves.toEqual(
+      expect.objectContaining({
+        code: crpc.CloseStatusCode.Error
+      })
+    );
+  });
+
+  it("should close the connection by calling close", async () => {
+    const [left, right] = crpc.createLocalConnectionPair({
+      metadata: {}
+    });
+
+    await left.abort();
+
+    const status = {
+      code: crpc.CloseStatusCode.Error,
+      reason: "AbortError: The operation was aborted"
+    };
+
+    await expect(left.status).resolves.toEqual(status);
+    await expect(right.status).resolves.toEqual(status);
   });
 });

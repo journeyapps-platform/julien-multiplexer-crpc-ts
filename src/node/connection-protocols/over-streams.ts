@@ -1,5 +1,5 @@
 import * as connection from "../connection";
-import * as stream from "stream";
+import * as stream from "stream/web";
 import * as uuid from "uuid";
 
 /**
@@ -9,26 +9,29 @@ import * as uuid from "uuid";
  * tests and does not handle message framing
  */
 export const createLocalConnectionPair = (
-  params: connection.CreateConnectionParams
-) => {
-  const sink = new stream.PassThrough();
-  const source = new stream.PassThrough();
+  params?: connection.CreateConnectionParams
+): [connection.Connection, connection.Connection] => {
+  const id = params?.id || uuid.v4();
 
-  const id = params.metadata.id || uuid.v4();
-  const metadata = {
+  const left_sink = new stream.TransformStream();
+  const left_source = new stream.TransformStream();
+
+  const right_sink = new stream.TransformStream();
+  const right_source = new stream.TransformStream();
+
+  const left_connection = connection.create({
     id,
-    ...params.metadata,
-  };
-  const left = connection.create({
-    metadata: metadata,
-    sink: sink,
-    source: source,
-  });
-  const right = connection.create({
-    metadata: metadata,
-    sink: source,
-    source: sink,
+    metadata: params?.metadata,
+    sink: left_sink.writable,
+    source: right_sink.readable.pipeThrough(left_source)
   });
 
-  return [left, right];
+  const right_connection = connection.create({
+    id,
+    metadata: params?.metadata,
+    sink: right_sink.writable,
+    source: left_sink.readable.pipeThrough(right_source)
+  });
+
+  return [left_connection, right_connection];
 };

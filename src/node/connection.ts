@@ -1,78 +1,172 @@
-import * as stream from "stream";
+import * as stream from "stream/web";
 import * as uuid from "uuid";
 
-export type ConnectionMetadata = Record<string, any> & {
-  id?: string;
-};
+export type ConnectionMetadata = Record<string, any>;
 
-export enum CloseStatus {
+export enum CloseStatusCode {
   Error = "error",
-  Success = "success",
+  Success = "success"
 }
 
-export type Connection = {
+export type CloseStatus = {
+  code: CloseStatusCode;
+  reason?: string;
+};
+
+export type Connection<I = Buffer, O = Buffer> = {
   id: string;
-  source: stream.Duplex;
-  sink: stream.Writable;
   metadata: ConnectionMetadata;
+
+  source: stream.ReadableStream<O>;
+  sink: stream.WritableStream<I>;
+
   closed: boolean;
-  close_status: Promise<CloseStatus>;
+  status: Promise<CloseStatus>;
+
+  source_closed: boolean;
+  source_status: Promise<CloseStatus>;
+
+  sink_closed: boolean;
+  sink_status: Promise<CloseStatus>;
+
+  abort: () => Promise<void>;
 };
 
 export type CreateConnectionParams = {
-  metadata: ConnectionMetadata;
+  id?: string;
+  metadata?: Partial<ConnectionMetadata>;
 };
 
-export const close = (connection: Connection, err?: Error) => {
-  connection.closed = true;
+const asCloseStatus = (operation: Promise<any>): Promise<CloseStatus> => {
+  return operation
+    .then(() => {
+      return {
+        code: CloseStatusCode.Success
+      };
+    })
+    .catch((err) => {
+      let reason;
+      if (err) {
+        if (err instanceof Error) {
+          reason = err.message;
+        } else {
+          reason = err.toString();
+        }
+      }
 
-  connection.source.end();
-  connection.sink.end();
-  connection.source.destroy(err);
-  connection.sink.destroy(err);
+      return {
+        code: CloseStatusCode.Error,
+        reason
+      };
+    });
 };
 
-type CreateConnectionFromStreamParams = CreateConnectionParams & {
-  source: stream.Duplex;
-  sink: stream.Writable;
-};
-export const create = (
-  params: CreateConnectionFromStreamParams
-): Connection => {
-  let resolve: (status: CloseStatus) => void;
-  const connection: Connection = {
-    id: params.metadata.id || uuid.v4(),
-    source: params.source,
-    sink: params.sink,
-    closed: false,
-    close_status: new Promise((r) => {
-      resolve = r;
-    }),
-    metadata: params.metadata,
+const createDeferredPromise = <T = void>() => {
+  let resolve: (arg: T) => void, reject: (err?: Error | any) => void;
+  let settled = false;
+  const promise = new Promise<T>((_resolve, _reject) => {
+    resolve = (arg) => {
+      settled = true;
+      _resolve(arg);
+    };
+    reject = (err) => {
+      settled = true;
+      _reject(err);
+    };
+  });
+  return {
+    promise,
+    get settled() {
+      return settled;
+    },
+    resolve: resolve!,
+    reject: reject!
   };
+};
 
-  const close = (status: CloseStatus, err?: Error) => {
-    if (!params.sink.destroyed) {
-      params.sink.destroy(err);
+export type CreateConnectionFromStream<
+  I = Buffer,
+  O = Buffer
+> = CreateConnectionParams & {
+  source: stream.ReadableStream<O>;
+  sink: stream.WritableStream<I>;
+};
+export const create = <I, O>(
+  params: CreateConnectionFromStream<I, O>
+): Connection<I, O> => {
+  const controller = new AbortController();
+
+  const source = new stream.TransformStream();
+  const sink = new stream.TransformStream();
+
+  const source_status = createDeferredPromise<CloseStatus>();
+  const sink_status = createDeferredPromise<CloseStatus>();
+
+  asCloseStatus(
+    params.source.pipeTo(source.writable, {
+      signal: controller.signal
+    })
+  ).then((status) => {
+    source_status.resolve(status);
+    if (status.code === CloseStatusCode.Error) {
+      controller.abort();
     }
+  });
 
-    if (!params.source.destroyed) {
-      params.source.destroy(err);
+  asCloseStatus(
+    sink.readable.pipeTo(params.sink, {
+      signal: controller.signal
+    })
+  ).then((status) => {
+    sink_status.resolve(status);
+    if (status.code === CloseStatusCode.Error) {
+      controller.abort();
     }
+  });
 
-    if (!params.sink.writable && !params.source.readable) {
-      connection.closed = true;
-      resolve(status);
+  let closed = false;
+
+  const connection_status = Promise.all([
+    source_status.promise,
+    sink_status.promise
+  ]).then((statuses) => {
+    closed = true;
+
+    const failed_status = statuses.find(
+      (status) => status.code === CloseStatusCode.Error
+    );
+    if (failed_status) {
+      return failed_status;
+    }
+    return {
+      code: CloseStatusCode.Success
+    };
+  });
+
+  return {
+    id: params.id || uuid.v4(),
+    metadata: params.metadata || {},
+
+    source: source.readable,
+    sink: sink.writable,
+
+    abort: async () => {
+      controller.abort();
+      await connection_status;
+    },
+
+    status: connection_status,
+    get closed() {
+      return closed;
+    },
+
+    source_status: source_status.promise,
+    get source_closed() {
+      return source_status.settled;
+    },
+    sink_status: sink_status.promise,
+    get sink_closed() {
+      return sink_status.settled;
     }
   };
-
-  params.sink.once("end", () => close(CloseStatus.Success));
-  params.source.once("end", () => close(CloseStatus.Success));
-  params.sink.once("close", () => close(CloseStatus.Success));
-  params.source.once("close", () => close(CloseStatus.Success));
-
-  params.sink.once("error", (err) => close(CloseStatus.Error, err));
-  params.source.once("error", (err) => close(CloseStatus.Error, err));
-
-  return connection;
 };

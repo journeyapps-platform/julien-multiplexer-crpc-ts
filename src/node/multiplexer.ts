@@ -1,11 +1,11 @@
 import * as connection from "./connection";
-import * as stream from "stream";
+import * as stream from "stream/web";
 import * as uuid from "uuid";
 
 enum PacketType {
   Create = "create",
   Data = "data",
-  Close = "close",
+  Close = "close"
 }
 
 type CorrelationId = {
@@ -32,166 +32,194 @@ type Packet = CreatePacket | DataPacket | ClosePacket;
 export type Multiplexer = {
   connections: AsyncIterator<connection.Connection>;
   createConnection: (
-    params: connection.CreateConnectionParams
-  ) => connection.Connection;
+    params?: connection.CreateConnectionParams
+  ) => Promise<connection.Connection>;
 };
 
-const write = async (stream: stream.Writable, data: any) => {
-  if (!stream.writable) {
-    return;
-  }
-  if (stream.writableLength >= stream.writableHighWaterMark) {
-    await new Promise<void>((resolve) => {
-      const _resolve = () => {
-        stream.off("drain", _resolve);
-        stream.off("close", _resolve);
-        resolve();
-      };
-      stream.once("drain", _resolve);
-      stream.once("close", _resolve);
-    });
-  }
-  stream.write(data);
-};
-
-const writePacket = (stream: stream.Writable, packet: Packet) => {
-  return write(stream, packet);
-};
-
-export const createDataPacketWritable = (sink: stream.Writable, id: string) => {
-  return new stream.Writable({
-    async write(chunk, _, done) {
-      await writePacket(sink, {
+export const createDataPacketWritable = (
+  sink: stream.WritableStreamDefaultWriter<Packet>,
+  id: string
+) => {
+  return new stream.WritableStream<Buffer>({
+    async write(chunk) {
+      return sink.write({
         id: id,
 
         type: PacketType.Data,
-        data: chunk,
+        data: chunk
       });
-      done();
     },
-    final(done) {
-      writePacket(sink, {
+    close() {
+      return sink.write({
         id: id,
 
         type: PacketType.Data,
-        data: null,
+        data: null
       });
-      done();
     },
+    abort(err) {
+      return sink
+        .write({
+          id: id,
+
+          type: PacketType.Close,
+          status: {
+            code: connection.CloseStatusCode.Error,
+            reason: err?.toString()
+          }
+        })
+        .catch(() => {});
+    }
   });
+};
+
+type ActiveConnection = {
+  connection: connection.Connection;
+  sink: stream.WritableStreamDefaultWriter<Buffer>;
 };
 
 export const createMultiplexer = (
-  transport: connection.Connection
+  transport: connection.Connection<Packet, Packet>
 ): Multiplexer => {
-  const connections = new Map<string, connection.Connection>();
+  const incoming_connections = new stream.TransformStream();
+  const active_connections = new Map<string, ActiveConnection>();
 
-  const new_connections = new stream.PassThrough({
-    objectMode: true,
-  });
+  const appendIncomingConnection = (conn: connection.Connection) => {
+    const writer = incoming_connections.writable.getWriter();
+    writer.write(conn);
+    writer.releaseLock();
+  };
 
-  stream.pipeline(
-    transport.source,
-    new stream.Writable({
-      objectMode: true,
-      async write(packet: Packet, _, done) {
-        try {
+  const sink = transport.sink.getWriter();
+
+  transport.source
+    .pipeTo(
+      new stream.WritableStream({
+        async write(packet) {
           switch (packet.type) {
             case PacketType.Create: {
+              const source = new stream.TransformStream();
+
               const new_connection = connection.create({
-                metadata: {
-                  id: packet.id,
-                  ...packet.metadata,
-                },
+                id: packet.id,
+                metadata: packet.metadata,
 
-                source: new stream.PassThrough(),
-                sink: createDataPacketWritable(transport.sink, packet.id),
+                source: source.readable,
+                sink: createDataPacketWritable(sink, packet.id)
               });
 
-              new_connection.close_status.then((status) => {
-                writePacket(transport.sink, {
-                  id: new_connection.id,
+              new_connection.status.then((status) => {
+                active_connections.delete(new_connection.id);
+                sink
+                  .write({
+                    id: new_connection.id,
 
-                  type: PacketType.Close,
-                  status: status,
-                });
+                    type: PacketType.Close,
+                    status: status
+                  })
+                  .catch(() => {});
               });
 
-              connections.set(packet.id, new_connection);
-              new_connections.write(new_connection);
+              active_connections.set(packet.id, {
+                connection: new_connection,
+                sink: source.writable.getWriter()
+              });
+
+              appendIncomingConnection(new_connection);
               return;
             }
 
             case PacketType.Data: {
-              const connection = connections.get(packet.id);
-              if (!connection) {
+              const active_connection = active_connections.get(packet.id);
+              if (!active_connection) {
                 return;
               }
               if (packet.data === null) {
-                return connection.source.end();
+                if (active_connection.connection.source_closed) {
+                  return;
+                }
+                await active_connection.sink.close();
+                return;
               }
-              await write(connection.source, packet.data);
+              await active_connection.sink.write(packet.data);
               return;
             }
 
             case PacketType.Close: {
-              const conn = connections.get(packet.id);
-              if (!conn) {
+              const active_connection = active_connections.get(packet.id);
+              if (!active_connection) {
                 return;
               }
-              connection.close(conn);
-              connections.delete(packet.id);
+
+              if (!active_connection.connection.closed) {
+                await active_connection.connection.abort();
+                await active_connection.connection.status;
+              }
+
+              active_connections.delete(packet.id);
               return;
             }
           }
-        } finally {
-          done();
         }
-      },
-    }),
-    () => {}
-  );
+      })
+    )
+    .finally(async () => {
+      await incoming_connections.writable.abort().catch(() => {});
+      for (const { connection } of active_connections.values()) {
+        connection.abort().catch(() => {});
+      }
+    });
 
   return {
-    connections: new_connections[Symbol.asyncIterator](),
-    createConnection: (params) => {
+    /**
+     * This is being ignored due to issues in the @types/node types package which does not include the .values() API
+     */
+    // @ts-ignore
+    connections: incoming_connections.readable.values(),
+
+    createConnection: async (params) => {
       const id = uuid.v4();
 
-      const conn = connection.create({
-        sink: createDataPacketWritable(transport.sink, id),
-        source: new stream.PassThrough(),
-        metadata: {
-          id: id,
-          ...params.metadata,
-        },
-      });
-      connections.set(id, conn);
+      const source = new stream.TransformStream();
 
-      writePacket(transport.sink, {
+      const new_connection = connection.create({
+        sink: createDataPacketWritable(sink, id),
+        source: source.readable,
+        metadata: params?.metadata
+      });
+      active_connections.set(id, {
+        connection: new_connection,
+        sink: source.writable.getWriter()
+      });
+
+      await sink.write({
         id: id,
 
         type: PacketType.Create,
-        metadata: params.metadata,
+        metadata: params?.metadata || {}
       });
 
-      conn.close_status.then((status) => {
-        writePacket(transport.sink, {
-          id: id,
+      new_connection.status.then((status) => {
+        active_connections.delete(new_connection.id);
+        sink
+          .write({
+            id: id,
 
-          type: PacketType.Close,
-          status: status,
-        });
+            type: PacketType.Close,
+            status: status
+          })
+          .catch(() => {});
       });
 
-      return conn;
-    },
+      return new_connection;
+    }
   };
 };
 
 export const takeNextConnection = async (multiplexer: Multiplexer) => {
   const next = await multiplexer.connections.next();
   if (next.done === true) {
-    return null;
+    throw new Error("No more connections available");
   }
   return next.value;
 };
